@@ -275,17 +275,16 @@ object BigProjectSettings extends Plugin {
    * - any inputs to an update phase are changed (changes to generated inputs?)
    */
   private val transitiveUpdateCache = new ConcurrentHashMap[ProjectReference, Seq[UpdateReport]]()
-  private def dynamicTransitiveUpdateTask: Def.Initialize[Task[Seq[UpdateReport]]] =
-    (thisProject, transitiveUpdate.theTask).flatMap {
-      (proj, transitiveUpdateTask) =>
-        val key = LocalProject(proj.id)
-        val cached = transitiveUpdateCache.get(key)
-        if (cached != null) task(cached)
-        else (transitiveUpdateTask).map { calculated =>
-          transitiveUpdateCache.put(key, calculated)
-          calculated
-        }
+  private def dynamicTransitiveUpdateTask: Def.Initialize[Task[Seq[UpdateReport]]] = Def.taskDyn {
+    val key = LocalProject(thisProject.value.id)
+    val cached = transitiveUpdateCache.get(key)
+    if (cached != null) Def.task(cached)
+    else Def.task {
+      val calculated = transitiveUpdate.value
+      transitiveUpdateCache.put(key, calculated)
+      calculated
     }
+  }
 
   /**
    * dependencyClasspath causes traversals of dependency projects.
