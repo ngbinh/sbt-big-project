@@ -132,8 +132,8 @@ object BigProjectSettings extends Plugin {
    * packageBin associated to a project when compiling that project so
    * that we never have stale jars.
    */
-  def deletePackageBinTask = (artifactPath in packageBin, state).map { (jar, s) =>
-    deleteLockedFile(s.log, jar)
+  def deletePackageBinTask = Def.task {
+    deleteLockedFile(state.value.log, (artifactPath in packageBin).value)
   }
 
   /**
@@ -147,10 +147,10 @@ object BigProjectSettings extends Plugin {
    * Similar to deletePackageBinTask but works for all configurations
    * of the current project.
    */
-  private def deleteAllPackageBinTask = (thisProjectRef, state).map { (proj, s) =>
-    val structure = Project.extract(s).structure
-    allPackageBins(structure, s.log, proj).foreach { jar =>
-      deleteLockedFile(s.log, jar)
+  private def deleteAllPackageBinTask = Def.task {
+    val structure = Project.extract(state.value).structure
+    allPackageBins(structure, state.value.log, thisProjectRef.value).foreach { jar =>
+      deleteLockedFile(state.value.log, jar)
     }
   }
 
@@ -194,10 +194,10 @@ object BigProjectSettings extends Plugin {
       if jar.exists() && changes(srcDirs ++ resourceDirs, jar.lastModified())
     } yield jar
 
-  private def deleteOutdatedPackageBinsTask = (thisProjectRef, state).map { (proj, s) =>
-    val structure = Project.extract(s).structure
-    outdatedPackageBins(structure, s.log, proj).foreach { jar =>
-      deleteLockedFile(s.log, jar)
+  private def deleteOutdatedPackageBinsTask = Def.task {
+    val structure = Project.extract(state.value).structure
+    outdatedPackageBins(structure, state.value.log, thisProjectRef.value).foreach { jar =>
+      deleteLockedFile(state.value.log, jar)
     }
   }
 
@@ -227,34 +227,33 @@ object BigProjectSettings extends Plugin {
    *
    * We use the file's existence as the cache.
    */
-  private def dynamicPackageBinTask: Def.Initialize[Task[File]] = (
-    classDirectory,
-    (artifactPath in packageBin),
-    lastCompilableJar,
-    (streams in packageBin),
-    packageOptions,
-    compile.theTask,
-    copyResources.theTask,
-    state
-  ).flatMap { (classes, jar, lastOpt, s, options, compileTask, copyResourcesTask, st) =>
-      if (jar.exists) {
-        lastOpt.foreach { last => createOrUpdateLast(s.log, jar, last) }
-        task(jar)
-      } else {
-        (compileTask, copyResourcesTask).map { _ =>
-          FastPackage(classes, jar, options, s.log)
-          lastOpt.foreach { last => createOrUpdateLast(s.log, jar, last) }
+  def dynamicPackageBinTask: Def.Initialize[Task[File]] = Def.taskDyn {
+    val classes = classDirectory.value
+    val jar = (artifactPath in packageBin).value
+    val lastOpt = lastCompilableJar.value
+    val s = (streams in packageBin).value
+    val options = packageOptions.value
 
-          val clazz = Class.forName("sbt.classpath.ClassLoaderCache")
-          val field = clazz.getDeclaredField("delegate")
-          field.setAccessible(true)
-          val delegate = field.get(st.classLoaderCache).asInstanceOf[java.util.HashMap[_, _]]
-          delegate.clear() // could close the values too, but they are also private
-
-          jar
-        }
-      }
+    if (jar.exists) Def.task {
+      lastOpt.foreach { last => createOrUpdateLast(s.log, jar, last) }
+      jar
     }
+    else Def.task {
+      val c = compile.value
+      val cp = copyResources.value
+
+      FastPackage(classes, jar, options, s.log)
+      lastOpt.foreach { last => createOrUpdateLast(s.log, jar, last) }
+
+      val clazz = Class.forName("sbt.classpath.ClassLoaderCache")
+      val field = clazz.getDeclaredField("delegate")
+      field.setAccessible(true)
+      val delegate = field.get(state.value.classLoaderCache).asInstanceOf[java.util.HashMap[_, _]]
+      delegate.clear() // could close the values too, but they are also private
+
+      jar
+    }
+  }
 
   def createOrUpdateLast(log: Logger, jar: File, last: File): Unit =
     // since this is for IDE's, which may have a performacne cost to
@@ -275,17 +274,16 @@ object BigProjectSettings extends Plugin {
    * - any inputs to an update phase are changed (changes to generated inputs?)
    */
   private val transitiveUpdateCache = new ConcurrentHashMap[ProjectReference, Seq[UpdateReport]]()
-  private def dynamicTransitiveUpdateTask: Def.Initialize[Task[Seq[UpdateReport]]] =
-    (thisProject, transitiveUpdate.theTask).flatMap {
-      (proj, transitiveUpdateTask) =>
-        val key = LocalProject(proj.id)
-        val cached = transitiveUpdateCache.get(key)
-        if (cached != null) task(cached)
-        else (transitiveUpdateTask).map { calculated =>
-          transitiveUpdateCache.put(key, calculated)
-          calculated
-        }
+  private def dynamicTransitiveUpdateTask: Def.Initialize[Task[Seq[UpdateReport]]] = Def.taskDyn {
+    val key = LocalProject(thisProject.value.id)
+    val cached = transitiveUpdateCache.get(key)
+    if (cached != null) Def.task { cached }
+    else Def.task {
+      val calculated = transitiveUpdate.value
+      transitiveUpdateCache.put(key, calculated)
+      calculated
     }
+  }
 
   /**
    * dependencyClasspath causes traversals of dependency projects.
@@ -298,17 +296,16 @@ object BigProjectSettings extends Plugin {
    * cached classpath exist, if any are missing, we do the work.
    */
   private val dependencyClasspathCache = new ConcurrentHashMap[(ProjectReference, Configuration), Classpath]()
-  private def dynamicDependencyClasspathTask: Def.Initialize[Task[Classpath]] =
-    (thisProject, configuration, dependencyClasspath.theTask).flatMap {
-      (proj, config, dependencyClasspathTask) =>
-        val key = (LocalProject(proj.id), config)
-        val cached = dependencyClasspathCache.get(key)
-        if (cached != null && cached.forall(_.data.exists())) task(cached)
-        else (dependencyClasspathTask).map { calculated =>
-          dependencyClasspathCache.put(key, calculated)
-          calculated
-        }
+  private def dynamicDependencyClasspathTask: Def.Initialize[Task[Classpath]] = Def.taskDyn {
+    val key = (LocalProject(thisProject.value.id), configuration.value)
+    val cached = dependencyClasspathCache.get(key)
+    if (cached != null && cached.forall(_.data.exists())) Def.task { cached }
+    else Def.task {
+      val calculated = dependencyClasspath.value
+      dependencyClasspathCache.put(key, calculated)
+      calculated
     }
+  }
 
   /**
    * Gets invoked when the dependencyClasspath cache misses. We use
@@ -316,17 +313,16 @@ object BigProjectSettings extends Plugin {
    * missing for ThisProject.
    */
   val exportedProductsCache = new ConcurrentHashMap[(ProjectReference, Configuration), Classpath]()
-  def dynamicExportedProductsTask: Def.Initialize[Task[Classpath]] =
-    (thisProject, configuration, artifactPath in packageBin, exportedProducts.theTask).flatMap {
-      (proj, config, jar, exportedProductsTask) =>
-        val key = (LocalProject(proj.id), config)
-        val cached = exportedProductsCache.get(key)
-        if (jar.exists() && cached != null) task(cached)
-        else exportedProductsTask.map { calculated =>
-          exportedProductsCache.put(key, calculated)
-          calculated
-        }
+  def dynamicExportedProductsTask: Def.Initialize[Task[Classpath]] = Def.taskDyn {
+    val key = (LocalProject(thisProject.value.id), configuration.value)
+    val cached = exportedProductsCache.get(key)
+    if ((artifactPath in packageBin).value.exists() && cached != null) Def.task { cached }
+    else Def.task {
+      val calculated = exportedProducts.value
+      exportedProductsCache.put(key, calculated)
+      calculated
     }
+  }
 
   /**
    * projectDescriptors causes traversals of dependency projects.
@@ -336,16 +332,16 @@ object BigProjectSettings extends Plugin {
    * - any project changes, all dependent project's caches must be cleared
    */
   private val projectDescriptorsCache = new ConcurrentHashMap[ProjectReference, Map[ModuleRevisionId, ModuleDescriptor]]()
-  private def dynamicProjectDescriptorsTask: Def.Initialize[Task[Map[ModuleRevisionId, ModuleDescriptor]]] =
-    (thisProject, projectDescriptors.theTask).flatMap { (proj, projectDescriptorsTask) =>
-      val key = LocalProject(proj.id)
-      val cached = projectDescriptorsCache.get(key)
-      if (cached != null) task(cached)
-      else (projectDescriptorsTask).map { calculated =>
-        projectDescriptorsCache.put(key, calculated)
-        calculated
-      }
+  private def dynamicProjectDescriptorsTask: Def.Initialize[Task[Map[ModuleRevisionId, ModuleDescriptor]]] = Def.taskDyn {
+    val key = LocalProject(thisProject.value.id)
+    val cached = projectDescriptorsCache.get(key)
+    if (cached != null) Def.task { cached }
+    else Def.task {
+      val calculated = projectDescriptors.value
+      projectDescriptorsCache.put(key, calculated)
+      calculated
     }
+  }
 
   /**
    * Returns the exhaustive set of projects that depend on the given one
@@ -388,43 +384,47 @@ object BigProjectSettings extends Plugin {
   /**
    * Deletes all the packageBins of dependent projects.
    */
-  def breakingChangeTask: Def.Initialize[Task[Unit]] =
-    (state, thisProjectRef).map { (s, proj) =>
-      val structure = Project.extract(s).structure
-      downstreamAndSelfJars(structure, s.log, proj).foreach { jar =>
-        s.log.info(s"deleting $jar")
-        deleteLockedFile(s.log, jar)
-      }
+  def breakingChangeTask: Def.Initialize[Task[Unit]] = Def.task {
+    val s = state.value
+    val structure = Project.extract(s).structure
+    downstreamAndSelfJars(structure, s.log, thisProjectRef.value).foreach { jar =>
+      s.log.info(s"deleting $jar")
+      deleteLockedFile(s.log, jar)
     }
+  }
 
   /**
    * Deletes all dependent jars if any inputs are more recent than the
    * oldest output.
    */
-  def breakOnChangesTask: Def.Initialize[Task[Unit]] =
-    (state, thisProjectRef, sourceDirectories in Compile, resourceDirectories in Compile).map { (s, proj, srcs, ress) =>
-      // note, we do not use `sources' or `resources' because they can
-      // have transient dependencies on compile.
-      val structure = Project.extract(s).structure
+  def breakOnChangesTask: Def.Initialize[Task[Unit]] = Def.task {
+    val s = state.value
+    val proj = thisProjectRef.value
+    val srcs = (sourceDirectories in Compile).value
+    val ress = (resourceDirectories in Compile).value
 
-      // wasteful that we do this many times when aggregating
-      val jars = downstreamAndSelfJars(structure, s.log, proj)
+    // note, we do not use `sources' or `resources' because they can
+    // have transient dependencies on compile.
+    val structure = Project.extract(s).structure
 
-      // this is the expensive bit, we do it exactly as much as we need
-      if (jars.nonEmpty) {
-        val oldest = jars.map(_.lastModified()).min
-        val inputs = for {
-          dir <- (srcs ++ ress)
-          input <- (dir ** "*").filter(_.isFile).get
-        } yield input
+    // wasteful that we do this many times when aggregating
+    val jars = downstreamAndSelfJars(structure, s.log, proj)
 
-        inputs.find(_.lastModified() > oldest).foreach { _ =>
-          for {
-            jar <- jars
-          } deleteLockedFile(s.log, jar)
-        }
+    // this is the expensive bit, we do it exactly as much as we need
+    if (jars.nonEmpty) {
+      val oldest = jars.map(_.lastModified()).min
+      val inputs = for {
+        dir <- (srcs ++ ress)
+        input <- (dir ** "*").filter(_.isFile).get
+      } yield input
+
+      inputs.find(_.lastModified() > oldest).foreach { _ =>
+        for {
+          jar <- jars
+        } deleteLockedFile(s.log, jar)
       }
     }
+  }
 
   /**
    * We want to be sure that this is the last collection of Settings
@@ -436,28 +436,28 @@ object BigProjectSettings extends Plugin {
     forcegc := false, // class-monkey
     exportJars := true,
     trackInternalDependencies := TrackLevel.TrackIfMissing,
-    transitiveUpdate <<= dynamicTransitiveUpdateTask,
-    projectDescriptors <<= dynamicProjectDescriptorsTask,
-    breakingChange <<= breakingChangeTask,
-    breakOnChanges <<= breakOnChangesTask
+    transitiveUpdate := dynamicTransitiveUpdateTask.value,
+    projectDescriptors := dynamicProjectDescriptorsTask.value,
+    breakingChange := breakingChangeTask.value,
+    breakOnChanges := breakOnChangesTask.value
   ) ++ configs.flatMap { config =>
       inConfig(config)(
         Seq(
           discoveredMainClasses := Nil,
-          lastCompilableJar <<= lastCompilableJarTask,
-          packageBin <<= dynamicPackageBinTask,
-          dependencyClasspath <<= dynamicDependencyClasspathTask,
-          exportedProducts <<= dynamicExportedProductsTask,
-          runMain <<= runMain dependsOn deletePackageBinTask
+          lastCompilableJar := lastCompilableJarTask.value,
+          packageBin := dynamicPackageBinTask.value,
+          dependencyClasspath := dynamicDependencyClasspathTask.value,
+          exportedProducts := dynamicExportedProductsTask.value,
+          runMain := (runMain dependsOn deletePackageBinTask).evaluated
         ) ++ {
             if (config == Test || config.extendsConfigs.contains(Test)) Seq(
               // race condition, compiles start to fail if we do this...
               // compile <<= compile dependsOn deleteAllPackageBinTask,
-              test <<= test dependsOn deleteOutdatedPackageBinsTask,
-              testOnly <<= testOnly dependsOn deleteOutdatedPackageBinsTask
+              test := (test dependsOn deleteOutdatedPackageBinsTask).value,
+              testOnly := (testOnly dependsOn deleteOutdatedPackageBinsTask).evaluated
             )
             else Seq(
-              compile <<= compile dependsOn deletePackageBinTask
+              compile := (compile dependsOn deletePackageBinTask).value
             )
           }
       )
